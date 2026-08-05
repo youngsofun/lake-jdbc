@@ -7,6 +7,8 @@ import com.tidbcloud.jdbc.internal.exception.LakeQueryException;
 import com.tidbcloud.jdbc.internal.exception.LakeSessionException;
 import com.tidbcloud.jdbc.internal.exception.LakeStageUploadException;
 import com.tidbcloud.jdbc.internal.exception.LakeStreamingLoadException;
+import com.tidbcloud.jdbc.internal.http.NonRetryableHttpStatusException;
+import com.tidbcloud.jdbc.internal.http.PresignRequestFailedException;
 import com.tidbcloud.jdbc.internal.http.RetryableHttpStatusException;
 import com.tidbcloud.jdbc.internal.query.QueryResultPages;
 import okhttp3.Interceptor;
@@ -33,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -253,8 +256,8 @@ public class TestLakeSessionHandle {
                         .build()));
 
         Assert.assertTrue(exception.getMessage().contains("service unavailable"), exception.getMessage());
-        Assert.assertTrue(exception.getCause() instanceof RetryableHttpStatusException,
-                exception.getCause().getClass().getName());
+        Assert.assertTrue(exception.getCause().getMessage().contains("service unavailable"),
+                exception.getCause().getMessage());
         Assert.assertEquals(attempts.get().intValue(), 1);
     }
 
@@ -1069,8 +1072,62 @@ public class TestLakeSessionHandle {
             Assert.assertTrue(exception.getCause() instanceof LakePresignException, String.valueOf(exception.getCause()));
             Assert.assertTrue(exception.getCause().getMessage().contains("Failed to open presigned download stream"),
                     exception.getCause().getMessage());
+            Assert.assertTrue(exception.getCause().getCause() instanceof NonRetryableHttpStatusException,
+                    String.valueOf(exception.getCause().getCause()));
             Assert.assertTrue(exception.getCause().getCause().getMessage().contains("Unauthorized user"),
                     exception.getCause().getCause().getMessage());
+        }
+        finally {
+            queryServer.stop(0);
+            downloadServer.stop(0);
+        }
+    }
+
+    @Test(groups = {"UNIT"}, timeOut = 30000)
+    public void testDownloadStreamPresignedRetryExhaustionRaisesSQLException() throws Exception {
+        HttpServer queryServer = HttpServer.create(new InetSocketAddress(0), 0);
+        HttpServer downloadServer = HttpServer.create(new InetSocketAddress(0), 0);
+        AtomicInteger attempts = new AtomicInteger();
+        downloadServer.createContext("/download", exchange -> {
+            try {
+                attempts.incrementAndGet();
+                byte[] payload = "temporary".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(504, payload.length);
+                exchange.getResponseBody().write(payload);
+            }
+            finally {
+                exchange.close();
+            }
+        });
+        queryServer.createContext("/v1/query", exchange -> {
+            try {
+                byte[] response = presignQueryResponse("{}",
+                        "http://127.0.0.1:" + downloadServer.getAddress().getPort() + "/download")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+            finally {
+                exchange.close();
+            }
+        });
+        downloadServer.start();
+        queryServer.start();
+
+        try {
+            LakeSessionHandle handle = createSessionHandle(
+                    URI.create("http://127.0.0.1:" + queryServer.getAddress().getPort()));
+
+            SQLException exception = Assert.expectThrows(SQLException.class,
+                    () -> handle.downloadStream("~", "path/file.txt"));
+            Assert.assertTrue(exception.getMessage().contains("Failed to open presigned download stream"), exception.getMessage());
+            Assert.assertTrue(exception.getCause() instanceof LakePresignException, String.valueOf(exception.getCause()));
+            Assert.assertTrue(exception.getCause().getCause() instanceof PresignRequestFailedException,
+                    String.valueOf(exception.getCause().getCause()));
+            Assert.assertTrue(exception.getCause().getCause().getMessage().contains("Presign request failed"),
+                    exception.getCause().getCause().getMessage());
+            Assert.assertEquals(attempts.get(), 20);
         }
         finally {
             queryServer.stop(0);
