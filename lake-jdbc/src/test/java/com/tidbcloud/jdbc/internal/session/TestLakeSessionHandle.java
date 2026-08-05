@@ -7,6 +7,7 @@ import com.tidbcloud.jdbc.internal.exception.LakeQueryException;
 import com.tidbcloud.jdbc.internal.exception.LakeSessionException;
 import com.tidbcloud.jdbc.internal.exception.LakeStageUploadException;
 import com.tidbcloud.jdbc.internal.exception.LakeStreamingLoadException;
+import com.tidbcloud.jdbc.internal.http.RetryableHttpStatusException;
 import com.tidbcloud.jdbc.internal.query.QueryResultPages;
 import okhttp3.Interceptor;
 import okhttp3.MediaType;
@@ -251,9 +252,9 @@ public class TestLakeSessionHandle {
                         })
                         .build()));
 
-        Assert.assertTrue(exception.getMessage().contains("not replayable"), exception.getMessage());
-        Assert.assertTrue(exception.getCause().getMessage().contains("service unavailable"),
-                exception.getCause().getMessage());
+        Assert.assertTrue(exception.getMessage().contains("service unavailable"), exception.getMessage());
+        Assert.assertTrue(exception.getCause() instanceof RetryableHttpStatusException,
+                exception.getCause().getClass().getName());
         Assert.assertEquals(attempts.get().intValue(), 1);
     }
 
@@ -924,10 +925,10 @@ public class TestLakeSessionHandle {
             Assert.assertTrue(exception.getCause() instanceof LakePresignException, String.valueOf(exception.getCause()));
             Assert.assertTrue(exception.getCause().getMessage().contains("Failed to upload via presigned request"),
                     exception.getCause().getMessage());
-            Assert.assertTrue(exception.getCause().getCause().getMessage().contains("not replayable"),
+            Assert.assertTrue(exception.getCause().getCause() instanceof RetryableHttpStatusException,
+                    exception.getCause().getCause().getClass().getName());
+            Assert.assertTrue(exception.getCause().getCause().getMessage().contains("service unavailable"),
                     exception.getCause().getCause().getMessage());
-            Assert.assertTrue(exception.getCause().getCause().getCause().getMessage().contains("service unavailable"),
-                    exception.getCause().getCause().getCause().getMessage());
             Assert.assertEquals(uploadAttempts.get().intValue(), 1);
         }
         finally {
